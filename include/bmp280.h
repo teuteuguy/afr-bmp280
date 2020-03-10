@@ -1,5 +1,5 @@
 /**
- * bmp280_esp32.h - Component to work with BMP280 on ESP32
+ * bmp280.h - Component to work with BMP280
  *
  * Include this header file to use the component.
  *
@@ -7,8 +7,8 @@
  * This code is licensed under the MIT License.
  */
 
-#ifndef _BMP280_ESP32_H_
-#define _BMP280_ESP32_H_
+#ifndef _BMP280_H_
+#define _BMP280_H_
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,6 +17,16 @@ extern "C" {
 #include "freertos/FreeRTOS.h"
 #include "iot_i2c.h"
 #include "esp_err.h"
+
+#define BMP280_SUCCESS                  ( 0 )     /**< Operation completed successfully. */
+#define BMP280_FAIL                     ( 1 )     /**< Operation failed. */
+
+/**
+ * @brief   I2C ADDRESS/BITS/SETTINGS
+ */
+#define BMP280_ADDRESS      (0x77)  /**< The default I2C address for the sensor. */
+#define BMP280_ADDRESS_ALT  (0x76)  /**< Alternative I2C address for the sensor. */
+#define BMP280_CHIPID       (0x58)  /**< Default chip ID. */
 
 
 /**
@@ -37,7 +47,7 @@ extern "C" {
 #define BMP280_REGISTER_CHIPID 0xD0
 #define BMP280_REGISTER_VERSION 0xD1
 #define BMP280_REGISTER_SOFTRESET 0xE0
-#define BMP280_REGISTER_CAL26 0xE1 /**< R calibration 0xE1-0xF0 */
+#define BMP280_REGISTER_CAL26 0xE1        /**< R calibration 0xE1-0xF0 */
 #define BMP280_REGISTER_STATUS 0xF3
 #define BMP280_REGISTER_CONTROL 0xF4
 #define BMP280_REGISTER_CONFIG 0xF5
@@ -68,13 +78,13 @@ typedef struct {
 /**
  * @brief   Initialize BMP280 Sensor
  *
- * @return  ESP_OK success
- *          ESP_FAIL errors found
+ * @return  BMP280_SUCCESS success
+ *          BMP280_FAIL errors found
  */
-esp_err_t eBmp280Init( void );
+int eBmp280Init( void );
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // _BMP280_ESP32_H_
+#endif // _BMP280_H_
