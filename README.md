@@ -1,1 +1,1 @@
-# afr-bmp280-esp32
+# afr-bmp280
