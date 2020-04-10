@@ -1,5 +1,6 @@
 /**
- * bmp280.c - Component to work with BMP280
+ * @file bmp280.c
+ * @brief Component to work with BMP280
  *
  * (C) 2020 - Timothee Cruse <timothee.cruse@gmail.com>
  * This code is licensed under the MIT License.
@@ -8,16 +9,137 @@
 #include "bmp280.h"
 #include "math.h"
 
-static const char *TAG = "bmp280";
+#include "common_io_helpers.h"
 
-#define BMP280_CHECK_HANDLER() if ( prvI2CHandle == NULL ) { return BMP280_FAIL; }
+#define LIBRARY_LOG_LEVEL IOT_LOG_INFO
+#define LIBRARY_LOG_NAME  "bmp280"
+#include "iot_logging_setup.h"
 
 /*-----------------------------------------------------------*/
 
-static IotI2CHandle_t prvI2CHandle = NULL;
+static IotI2CHandle_t prvBmp280I2CHandle = NULL;
+
 int16_t oversampling, oversampling_t;
-uint8_t dig_T1, dig_T2 , dig_T3 , dig_T4 , dig_P1, dig_P2 , dig_P3, dig_P4, dig_P5, dig_P6, dig_P7, dig_P8, dig_P9; 
-double t_fine;
+uint16_t dig_T1, dig_P1;
+int16_t dig_T2, dig_T3, dig_P2, dig_P3, dig_P4, dig_P5, dig_P6, dig_P7, dig_P8, dig_P9; 
+int32_t t_fine;
+
+/*-----------------------------------------------------------*/
+
+bmp280_err_t prvReadCalibration( void );
+bmp280_err_t prvReadInt( uint8_t address, int16_t * value );
+bmp280_err_t prvReadUInt( uint8_t address, uint16_t * value );
+bmp280_err_t prvWriteBytes( uint8_t * values, uint8_t length );
+bmp280_err_t prvGetUncalibratedPressureAndTemperature( int32_t * uP, int32_t * uT );	
+
+/*-----------------------------------------------------------*/
+
+bmp280_err_t eBmp280Init( IotI2CHandle_t const handle )
+{
+    prvBmp280I2CHandle = handle;
+
+    uint8_t data = BMP280_REGISTER_CHIPID;
+    if ( eReadI2CBytes( prvBmp280I2CHandle, BMP280_ADDRESS_ALT, &data, 1 ) != COMMON_IO_SUCCESS )
+    {
+        IotLogError( "eBmp280Init: Failed to read the CHIP ID @ %#04x", BMP280_REGISTER_CHIPID );
+        return BMP280_FAIL;
+    }
+    if ( data != BMP280_CHIPID )
+    {
+        IotLogError( "eBmp280Init: CHIP ID is incorrect %#04x vs. %#04x", data, BMP280_CHIPID );
+        return BMP280_FAIL;
+    }
+    IotLogDebug( "eBmp280Init: CHIP ID is correct. Soft reseting the chip." );
+
+    if ( eBmp280SoftReset() != BMP280_SUCCESS )
+    {
+        IotLogError( "eBmp280Init: Failed to Soft Reset the chip" );
+        return BMP280_FAIL;
+    }
+
+    IotLogDebug( "eBmp280Init: Reading calibration" );
+
+    return prvReadCalibration();
+}
+
+/*-----------------------------------------------------------*/
+
+bmp280_err_t eBmp280SoftReset( void )
+{
+    uint8_t data[ 2 ] = { BMP280_REGISTER_SOFTRESET, 0xB6 };
+    if ( eWriteI2CBytes( prvBmp280I2CHandle, BMP280_ADDRESS_ALT, data, 1 ) != COMMON_IO_SUCCESS )
+    {
+        IotLogError( "eBmp280Init: Failed to soft reset the bmp280" );
+        return BMP280_FAIL;
+    }
+
+    return BMP280_SUCCESS;
+}
+
+/*-----------------------------------------------------------*/
+
+/**
+ * @brief   Read a signed integer (two bytes) from a BMP280 register
+ * @param   address:    register to start reading (plus subsequent register)
+ * @param   value:      external variable to store the signed integer (function modifies value)
+ * @return  BMP280_SUCCESS success
+ *          BMP280_FAIL errors found
+*/
+bmp280_err_t prvReadInt( uint8_t address, int16_t * value )
+{
+    uint8_t data[2];
+    data[0] = address;
+
+    if ( eReadI2CBytes( prvBmp280I2CHandle, BMP280_ADDRESS_ALT, data, 2 ) != COMMON_IO_SUCCESS )
+    {
+        IotLogError( "prvReadInt: Read of int (2 bytes) @ %#04x failed.", address );
+        return BMP280_FAIL;
+    }
+
+    *value = (int16_t)( ( (uint16_t)data[ 1 ] << 8 ) | (uint16_t)data[ 0 ] );
+    IotLogDebug( "prvReadInt: Read  %i @ %#04x", *value, address );
+    return BMP280_SUCCESS;
+}
+
+/**
+ * @brief   Read an unsigned integer (two bytes) from a BMP280 register
+ * @param   address:    register to start reading (plus subsequent register)
+ * @param   value:      external variable to store data (function modifies value)
+ * @return  BMP280_SUCCESS success
+ *          BMP280_FAIL errors found
+*/
+bmp280_err_t prvReadUInt( uint8_t address, uint16_t * value )
+{
+    uint8_t data[2];
+    data[0] = address;
+
+    if ( eReadI2CBytes( prvBmp280I2CHandle, BMP280_ADDRESS_ALT, data, 2 ) != COMMON_IO_SUCCESS )
+    {
+        IotLogError( "prvReadUInt: Read of uint (2 bytes) @ %#04x failed.", address );
+        return BMP280_FAIL;
+    }
+
+    *value = (uint16_t)( ( (uint16_t)data[ 1 ] << 8 ) | (uint16_t)data[ 0 ] );
+    IotLogDebug( "prvReadUInt: Read %u @ %#04x", *value, address );
+    return BMP280_SUCCESS;
+}
+
+/**
+ * @brief   Write a number of bytes to a BMP280 register (and consecutive subsequent registers)
+ * @param   value:      external array of data to write. Put starting register in values[0].
+ * @param   length:     number of bytes to write
+ * @return  BMP280_SUCCESS success
+ *          BMP280_FAIL errors found
+*/
+bmp280_err_t prvWriteBytes( uint8_t * values, uint8_t length )
+{
+    if ( eWriteI2CBytes( prvBmp280I2CHandle, BMP280_ADDRESS_ALT, values, length ) == COMMON_IO_SUCCESS )
+    {
+        return BMP280_SUCCESS;
+    }
+    IotLogError( "prvWriteBytes: Writing of (%u bytes) @ %#04x failed.", length, values[ 0 ] );
+    return BMP280_FAIL;
+}
 
 /*-----------------------------------------------------------*/
 
@@ -29,204 +151,6 @@ double t_fine;
  * @return  BMP280_SUCCESS success
  *          BMP280_FAIL errors found
 */
-bmp280_err_t prvReadCalibration( void );
-
-/**
- * @brief   Read a signed integer (two bytes) from a BMP280 register
- * @param   address:    register to start reading (plus subsequent register)
- * @param   value:      external variable to store the signed integer (function modifies value)
- * @return  BMP280_SUCCESS success
- *          BMP280_FAIL errors found
-*/
-bmp280_err_t prvReadInt( uint8_t address, int16_t * value );
-
-/**
- * @brief   Read an unsigned integer (two bytes) from a BMP280 register
- * @param   address:    register to start reading (plus subsequent register)
- * @param   value:      external variable to store data (function modifies value)
- * @return  BMP280_SUCCESS success
- *          BMP280_FAIL errors found
-*/
-bmp280_err_t prvReadUInt( uint8_t address, uint16_t * value );
-
-/**
- * @brief   Read an array of bytes a BMP280 register onwards
- * @param   value:      external array to hold data. Put starting register in values[0].
- * @param   length:     number of bytes to read
- * @return  BMP280_SUCCESS success
- *          BMP280_FAIL errors found
-*/
-bmp280_err_t prvReadBytes( uint8_t * values, uint8_t length );
-			
-/**
- * @brief   Write a number of bytes to a BMP280 register (and consecutive subsequent registers)
- * @param   value:      external array of data to write. Put starting register in values[0].
- * @param   length:     number of bytes to write
- * @return  BMP280_SUCCESS success
- *          BMP280_FAIL errors found
-*/
-bmp280_err_t prvWriteBytes( uint8_t * values, uint8_t length );
-		
-// get uncalibrated pressure and temperature value.
-bmp280_err_t prvGetUncalibratedPressureAndTemperature( double * uP, double * uT );	
-
-int16_t getOversampling( void );
-bmp280_err_t setOversampling( int16_t oss );
-
-/*-----------------------------------------------------------*/
-
-
-bmp280_err_t eBmp280Init( IotI2CHandle_t handle )
-{
-    prvI2CHandle = NULL;
-    return readCalibration();
-}
-
-/*-----------------------------------------------------------*/
-
-bmp280_err_t prvReadInt( uint8_t address, int16_t * value )
-{
-    uint8_t data[2];
-    data[0] = address;
-    if ( prvReadBytes( data, 2 ) == BMP280_SUCCESS )
-    {
-        *value = (int16_t)( ( (uint16_t)data[1] << 8 ) | (uint16_t)data[0] );
-        IotLogDebug( "Read %i @ %#04X", *value, address );
-        return BMP280_SUCCESS;
-    }
-
-    IotLogError( "Read of integer (2 bytes) @ %#04X failed.", address );
-    return BMP280_FAIL;
-}
-
-bmp280_err_t prvReadUInt( uint8_t address, uint16_t * value )
-{
-    uint8_t data[2];
-    data[0] = address;
-    if ( prvReadBytes( data, 2 ) == BMP280_SUCCESS )
-    {
-        *value = (uint16_t)( ( (uint16_t)data[1] << 8 ) | (uint16_t)data[0] );
-        IotLogDebug( "Read %u @ %#04X", *value, address );
-        return BMP280_SUCCESS;
-    }
-
-    IotLogError( "Read of unsigned integer (2 bytes) @ %#04X failed.", address );
-    return BMP280_FAIL;
-}
-
-bmp280_err_t prvReadBytes( uint8_t * values, uint8_t length )
-{
-    // Return value of I2C functions.
-    bmp280_err_t res = BMP280_FAIL;
-
-    BMP280_CHECK_HANDLER();
-
-    // Register address on I2C slave device.
-    uint16_t ioCtlBuffer = BMP280_ADDRESS;
- 
-    // Number of read/write bytes.
-    uint16_t usReadBytes = 0;
-    uint16_t usWriteBytes = 0;
-
-    uint8_t address = values[0];
-
-    // Set slave address.
-    res = iot_i2c_ioctl( prvI2CHandle, eI2CSetSlaveAddr, &ioCtlBuffer );
-    if ( res != IOT_I2C_SUCCESS )
-    {
-        IotLogError( "Setting the slave address for %#04X on I2C failed.", ioCtlBuffer );
-        return BMP280_FAIL;
-    }
-    // assert(lRetVal == IOT_I2C_SUCCESS);
-
-    // Write the register address as single byte, in a transaction.
-    res = iot_i2c_write_sync( prvI2CHandle, values, 1 );
-    if ( res == IOT_I2C_SUCCESS )
-    {
-        // Get the number of written bytes in last transaction.
-        res = iot_i2c_ioctl( prvI2CHandle, eI2CGetTxNoOfbytes, &usWriteBytes );
-        if ( res != IOT_I2C_SUCCESS || usWriteBytes != 1 ) 
-        {
-            IotLogError( "Failed to check the number of written bytes %u vs. %u.", usWriteBytes, 1 );
-            return BMP280_FAIL;
-        }
-
-        // Read length bytes of data to allocated buffer, in a transaction.
-        res = iot_i2c_read_sync( prvI2CHandle, values, length );
-        if ( res == IOT_I2C_SUCCESS )
-        {
-            // Get the number of read bytes in last transaction.
-            res = iot_i2c_ioctl( prvI2CHandle, eI2CGetRxNoOfbytes, &usReadBytes ); 
-            if ( res != IOT_I2C_SUCCESS || usReadBytes != length ) 
-            {
-                IotLogError( "Failed to check the number of read bytes %u vs. %u.", usReadBytes, length );
-                return BMP280_FAIL;
-            }
-
-            IotLogDebug( "Read %u bytes @ %#04X", length, address );
-
-            return BMP280_SUCCESS;
-        }
-    }
-    else
-    {
-        IotLogError( "Writing %#04X on I2C failed.", address );
-    }
-    
-    return BMP280_FAIL; 
-}
-
-bmp280_err_t prvWriteBytes( uint8_t * values, uint8_t length )
-{
-    // Return value of I2C functions.
-    bmp280_err_t res = BMP280_FAIL;
-
-    BMP280_CHECK_HANDLER();
-
-    // Register address on I2C slave device.
-    uint16_t ioCtlBuffer = BMP280_ADDRESS;
- 
-    // Number of read/write bytes.
-    uint16_t usReadBytes = 0;
-    uint16_t usWriteBytes = 0;
-
-    uint8_t address = values[0];
-
-    // Set slave address.
-    res = iot_i2c_ioctl( prvI2CHandle, eI2CSetSlaveAddr, &ioCtlBuffer );
-    if ( res != IOT_I2C_SUCCESS )
-    {
-        IotLogError( "Setting the slave address for %#04X on I2C failed.", ioCtlBuffer );
-        return BMP280_FAIL;
-    }
-    // assert(lRetVal == IOT_I2C_SUCCESS);
-
-    // Write the register address as single byte, in a transaction.
-    res = iot_i2c_write_sync( prvI2CHandle, values, length );
-    if ( res == IOT_I2C_SUCCESS )
-    {
-        // Get the number of written bytes in last transaction.
-        res = iot_i2c_ioctl( prvI2CHandle, eI2CGetTxNoOfbytes, &usWriteBytes );
-        if ( res != IOT_I2C_SUCCESS || usWriteBytes != length )
-        {
-            IotLogError( "Failed to check the number of written bytes %u vs. %u.", usWriteBytes, 1 );
-            return BMP280_FAIL;
-        }
-
-        IotLogDebug( "Wrote %u bytes @ %#04X", length, address );
-
-        return BMP280_SUCCESS;
-    }
-    else
-    {
-        IotLogError( "Writing %u bytes on I2C failed.", length );
-    }
-    
-    return BMP280_FAIL; 
-}
-
-/*-----------------------------------------------------------*/
-
 bmp280_err_t prvReadCalibration( void )
 {
     if (
@@ -244,39 +168,39 @@ bmp280_err_t prvReadCalibration( void )
         prvReadInt( BMP280_REGISTER_DIG_P9, &dig_P9 ) == BMP280_SUCCESS
     )
     {
-        IotLogDebug( "Read calibration values:" );
-        IotLogDebug( "dig_T1(%#04X) = %u", BMP280_REGISTER_DIG_T1, dig_T1 );
-        IotLogDebug( "dig_T2(%#04X) = %u", BMP280_REGISTER_DIG_T2, dig_T2 );
-        IotLogDebug( "dig_T3(%#04X) = %u", BMP280_REGISTER_DIG_T3, dig_T3 );
-        IotLogDebug( "dig_P1(%#04X) = %u", BMP280_REGISTER_DIG_P1, dig_P1 );
-        IotLogDebug( "dig_P2(%#04X) = %u", BMP280_REGISTER_DIG_P2, dig_P2 );
-        IotLogDebug( "dig_P3(%#04X) = %u", BMP280_REGISTER_DIG_P3, dig_P3 );
-        IotLogDebug( "dig_P4(%#04X) = %u", BMP280_REGISTER_DIG_P4, dig_P4 );
-        IotLogDebug( "dig_P5(%#04X) = %u", BMP280_REGISTER_DIG_P5, dig_P5 );
-        IotLogDebug( "dig_P6(%#04X) = %u", BMP280_REGISTER_DIG_P6, dig_P6 );
-        IotLogDebug( "dig_P7(%#04X) = %u", BMP280_REGISTER_DIG_P7, dig_P7 );
-        IotLogDebug( "dig_P8(%#04X) = %u", BMP280_REGISTER_DIG_P8, dig_P8 );
-        IotLogDebug( "dig_P9(%#04X) = %u", BMP280_REGISTER_DIG_P9, dig_P9 );
+        IotLogDebug( "prvReadCalibration: Read calibration values:" );
+        IotLogDebug( "prvReadCalibration: dig_T1(%#04x) = %i", BMP280_REGISTER_DIG_T1, dig_T1 );
+        IotLogDebug( "prvReadCalibration: dig_T2(%#04x) = %i", BMP280_REGISTER_DIG_T2, dig_T2 );
+        IotLogDebug( "prvReadCalibration: dig_T3(%#04x) = %i", BMP280_REGISTER_DIG_T3, dig_T3 );
+        IotLogDebug( "prvReadCalibration: dig_P1(%#04x) = %i", BMP280_REGISTER_DIG_P1, dig_P1 );
+        IotLogDebug( "prvReadCalibration: dig_P2(%#04x) = %i", BMP280_REGISTER_DIG_P2, dig_P2 );
+        IotLogDebug( "prvReadCalibration: dig_P3(%#04x) = %i", BMP280_REGISTER_DIG_P3, dig_P3 );
+        IotLogDebug( "prvReadCalibration: dig_P4(%#04x) = %i", BMP280_REGISTER_DIG_P4, dig_P4 );
+        IotLogDebug( "prvReadCalibration: dig_P5(%#04x) = %i", BMP280_REGISTER_DIG_P5, dig_P5 );
+        IotLogDebug( "prvReadCalibration: dig_P6(%#04x) = %i", BMP280_REGISTER_DIG_P6, dig_P6 );
+        IotLogDebug( "prvReadCalibration: dig_P7(%#04x) = %i", BMP280_REGISTER_DIG_P7, dig_P7 );
+        IotLogDebug( "prvReadCalibration: dig_P8(%#04x) = %i", BMP280_REGISTER_DIG_P8, dig_P8 );
+        IotLogDebug( "prvReadCalibration: dig_P9(%#04x) = %i", BMP280_REGISTER_DIG_P9, dig_P9 );
         return BMP280_SUCCESS;
     }
 
-    IotLogError( "Read of calibration failed.");
+    IotLogError( "prvReadCalibration: Read of calibration failed.");
 
     return BMP280_FAIL;
 }
 
 /*-----------------------------------------------------------*/
 
-int16_t getOversampling( void )
-{
-	return oversampling;
-}
+// int16_t iGetOversampling( void )
+// {
+// 	return oversampling;
+// }
 
-bmp280_err_t setOversampling( int16_t oss )
-{
-	oversampling = oss;
-	return BMP280_SUCCESS;
-}
+// bmp280_err_t eBmp280SetOversampling( int16_t oss )
+// {
+// 	oversampling = oss;
+// 	return BMP280_SUCCESS;
+// }
 
 /*-----------------------------------------------------------*/
 
@@ -287,11 +211,9 @@ bmp280_err_t setOversampling( int16_t oss )
  * @return  BMP280_SUCCESS success
  *          BMP280_FAIL errors found
 */
-bmp280_err_t startMeasurement( uint8_t * delay )
+bmp280_err_t eBmp280StartMeasurement( uint8_t * delay )
 {
-	uint8_t data[2], result;
-	
-	data[0] = BMP280_REGISTER_CONTROL;
+	uint8_t data[2] = { BMP280_REGISTER_CONTROL, 0 };
 
 	switch ( oversampling )
 	{
@@ -343,28 +265,28 @@ bmp280_err_t startMeasurement( uint8_t * delay )
  * @return  BMP280_SUCCESS success
  *          BMP280_FAIL errors found
 */
-bmp280_err_t prvGetUncalibratedPressureAndTemperature( double * uP, double * uT )
+bmp280_err_t prvGetUncalibratedPressureAndTemperature( int32_t * uP, int32_t * uT )
 {
-    uint8_t data[6];
-	bmp280_err_t result;
-	
-	data[0] = BMP280_REGISTER_PRESSUREDATA; // 0xF7 
+    uint8_t data[6] = { BMP280_REGISTER_PRESSUREDATA, 0, 0, BMP280_REGISTER_TEMPDATA, 0, 0 };
 
-	result = prvReadBytes( data, 6 );       // 0xF7; xF8, 0xF9, 0xFA, 0xFB, 0xFC
-	if ( result == BMP280_SUCCESS )         // good read
-	{
-		*uP = (double)( data[0] * 4096 + data[1] * 16 + data[2] / 16 );	//20bit UP
-		*uT = (double)( data[3] * 4096 + data[4] * 16 + data[5] / 16 );	//20bit UT
-	}
-    else
+    if ( eReadI2CBytes( prvBmp280I2CHandle, BMP280_ADDRESS_ALT, data, 3 ) == COMMON_IO_SUCCESS && 
+        eReadI2CBytes( prvBmp280I2CHandle, BMP280_ADDRESS_ALT, data + 3, 3 ) == COMMON_IO_SUCCESS
+    )
     {
-        IotLogError( "Getting uncalibrated readings failed.");
+        // *uP = (float)( data[0] * 4096 + data[1] * 16 + data[2] / 16 );	//20bit UP
+		// *uT = (float)( data[3] * 4096 + data[4] * 16 + data[5] / 16 );	//20bit UT
+        // IotLogDebug( "prvGetUncalibratedPressureAndTemperature: uP = %lf", *uP );
+        // IotLogDebug( "prvGetUncalibratedPressureAndTemperature: uT = %lf", *uT );
+        *uP = ( data[0] << 12 ) + ( data[1] << 4 ) + ( data[2] >> 4 );	//20bit UP
+        *uT = ( data[3] << 12 ) + ( data[4] << 4 ) + ( data[5] >> 4 );	//20bit UT
+        IotLogDebug( "prvGetUncalibratedPressureAndTemperature: %#04x, %#04x, %#04x, %#04x, %#04x, %#04x", data[0], data[1], data[2], data[3], data[4], data[5]);
+        IotLogDebug( "prvGetUncalibratedPressureAndTemperature: uP = %i", *uP );
+        IotLogDebug( "prvGetUncalibratedPressureAndTemperature: uT = %i", *uT );
+        return BMP280_SUCCESS;
     }
-    
-    IotLogDebug( "uP = %u", *uP );
-    IotLogDebug( "uT = %u", *uT );
 
-	return(result);
+    IotLogError( "prvGetUncalibratedPressureAndTemperature: Getting uncalibrated readings failed." );
+    return BMP280_FAIL;
 }
 
 /*-----------------------------------------------------------*/
@@ -377,35 +299,30 @@ bmp280_err_t prvGetUncalibratedPressureAndTemperature( double * uP, double * uT 
  * @return  BMP280_SUCCESS success
  *          BMP280_FAIL errors found
  */
-bmp280_err_t getTemperatureAndPressure( double * T, double * P )
+bmp280_err_t eBmp280GetTemperatureAndPressure( float * T, float * P )
 {
-	double uT, uP;
-	bmp280_err_t result = prvGetUncalibratedPressureAndTemperature( &uP, &uT );
-	
-    if( result == BMP280_SUCCESS )
+	int32_t uT, uP;
+	if ( prvGetUncalibratedPressureAndTemperature( &uP, &uT ) == BMP280_SUCCESS )
     {
 		// calculate the temperature
-		result = calcTemperature( &T, uT );
-		
-        if( result == BMP280_SUCCESS )
+        if ( eBmp280CalcTemperature( T, uT ) == BMP280_SUCCESS )
         {
-			// calculate the pressure
-			result = calcPressure( &P, uP );
-			
-            if ( result == BMP280_SUCCESS ) return BMP280_SUCCESS;
-            else return BMP280_CALC_PRESSURE_ERROR;
-		}
-        else 
-        {
-            return BMP280_CALC_TEMPERATURE_ERROR;
+
+            // calculate the pressure
+            if ( eBmp280CalcPressure( P, uP ) == BMP280_SUCCESS )
+            {
+                return BMP280_SUCCESS;
+            }
+
+            return BMP280_CALC_PRESSURE_ERROR;
+
         }
+
+        return BMP280_CALC_TEMPERATURE_ERROR;
+
 	}
-	else
-    {
-        return BMP280_GET_UNCAL_VALUES_ERROR;
-    }
-	
-	return BMP280_OTHER_ERROR;
+
+    return BMP280_GET_UNCAL_VALUES_ERROR;
 }
 
 /*-----------------------------------------------------------*/
@@ -418,24 +335,40 @@ bmp280_err_t getTemperatureAndPressure( double * T, double * P )
  * @return  BMP280_SUCCESS success
  *          BMP280_FAIL errors found
  */
-bmp280_err_t calcTemperature( double * T, double uT )
-{		
-	double var1 = ( uT / 16384.0 - dig_T1 / 1024.0 ) * dig_T2;
-	double var2 = ( ( uT / 131072.0 - dig_T1 / 8192.0 ) * ( uT / 131072.0 - dig_T1 / 8192.0 ) ) * dig_T3;
+bmp280_err_t eBmp280CalcTemperature( float * T, int32_t uT )
+{
+	// float var1 = ( uT / 16384.0 - dig_T1 / 1024.0 ) * dig_T2;
+	// float var2 = ( ( uT / 131072.0 - dig_T1 / 8192.0 ) * ( uT / 131072.0 - dig_T1 / 8192.0 ) ) * dig_T3;
 	
-    t_fine = var1 + var2;
+    // t_fine = var1 + var2;
 
-	*T = ( var1 + var2 ) / 5120.0;
+	// *T = ( var1 + var2 ) / 5120.0;
+
+    // if ( (*T) > 100 || (*T) < -100 )
+    // {
+    //     IotLogError( "eBmp280CalcTemperature: Calculating temperature failed: T = %lf", *T );
+    //     return BMP280_FAIL;
+    // }
+
+    // IotLogDebug( "eBmp280CalcTemperature: Calculated temperature: T = %lf", *T );
+
+
+    int32_t var1 = ( ( ((int32_t)uT >> 3) - ((int32_t)dig_T1 << 1) ) * ( (int32_t)dig_T2 ) ) >> 11;
+    int32_t var2 = ( ( ( ( ((int32_t)uT >> 4) - ( (int32_t)dig_T1 ) ) * ( ((int32_t)uT >> 4) - ( (int32_t)dig_T1 ) ) ) >> 12 ) * ( (int32_t)dig_T3 ) ) >> 14;
+
+    t_fine = var1 + var2;
+    *T = (float)( (int32_t)( ( (var1 + var2) * 5 + 128 ) >> 8 ) ) / 100;
 
     if ( (*T) > 100 || (*T) < -100 )
     {
-        IotLogError( "Calculating temperature failed: T = %lf", *T );
+        IotLogError( "eBmp280CalcTemperature: Calculating temperature failed: T = %f", *T );
         return BMP280_FAIL;
     }
 
-    IotLogDebug( "Calculated temperature: T = %lf", *T );
+    IotLogDebug( "eBmp280CalcTemperature: Calculated temperature: T = %f", *T );
 
     return BMP280_SUCCESS;
+
 }
 
 /*-----------------------------------------------------------*/
@@ -449,36 +382,58 @@ bmp280_err_t calcTemperature( double * T, double uT )
  * @return  BMP280_SUCCESS success
  *          BMP280_FAIL errors found
  */
-bmp280_err_t calcPressure( double * P, double uP )
+bmp280_err_t eBmp280CalcPressure( float * P, int32_t uP )
 {
-	double var1 = ( t_fine / 2.0 ) - 64000.0;
-    double var2 = var1 * ( var1 * dig_P6 / 32768.0 );   // not overflow
+    int64_t var1, var2, p;
 
-	var2 = var2 + ( var1 * dig_P5 * 2.0 );              // overflow
-
-	var2 = ( var2 / 4.0 ) + ( ( dig_P4 ) * 65536.0 );
-
-	var1 = ( dig_P3 * var1 * var1 / 524288.0 + dig_P2 * var1 ) / 524288.0;
-	var1 = ( 1.0 + var1 / 32768.0 ) * dig_P1;
-
-	*P = 1048576.0 - uP;
-
-	*P = ( (*P) - ( var2 / 4096.0 ) ) * 6250.0 / var1;  //overflow
-
-	var1 = dig_P9 * (*P) * (*P) / 2147483648.0; 	    //overflow
-
-	var2 = (*P) * dig_P8 / 32768.0;
-	*P = (*P) + ( var1 + var2 + dig_P7 ) / 16.0;
-		
-	*P = (*P) / 100.0;
-	
-	if ( (*P) > 1200.0 || (*P) < 800.0 ) 
+    var1 = ( (int64_t)t_fine ) - 128000;
+    var2 = var1 * var1 * (int64_t)dig_P6;
+    var2 = var2 + ( ( var1 * (int64_t)dig_P5 ) << 17 );
+    var2 = var2 + ( ( (int64_t)dig_P4 ) << 35 );
+    var1 = ( ( var1 * var1 * (int64_t)dig_P3 ) >> 8 ) + ( ( var1 * (int64_t)dig_P2 ) << 12 );
+    var1 = ( ( ( ( (int64_t)1 ) << 47 ) + var1 ) ) * ( (int64_t)dig_P1 ) >> 33;
+    if ( var1 == 0 )
     {
-        IotLogError( "Calculating pressure failed: P = %lf", *P );
-        return BMP280_FAIL;
+        IotLogError( "Calculating pressure failed: Protect against / 0" );
+        return BMP280_FAIL; // avoid exception caused by division by zero
     }
 
-    IotLogDebug( "Calculated pressure: P = %lf", *P );
+    p = 1048576 - uP;
+
+    p = ( ( ( p << 31 ) - var2 ) * 3125 ) / var1;
+    var1 = ( ( (int64_t)dig_P9 ) * ( p >> 13 ) * ( p >> 13 ) ) >> 25;
+    var2 = ( ( (int64_t)dig_P8 ) * p ) >> 19;
+    p = ( ( p + var1 + var2 ) >> 8 ) + ( ( (int64_t)dig_P7 ) << 4 );
+    *P = ( (float)p ) / 256 / 100;
+
+    // float var1 = ( t_fine / 2.0 ) - 64000.0;
+    // float var2 = var1 * ( var1 * dig_P6 / 32768.0 );   // not overflow
+
+	// var2 = var2 + ( var1 * dig_P5 * 2.0 );              // overflow
+
+	// var2 = ( var2 / 4.0 ) + ( ( dig_P4 ) * 65536.0 );
+
+	// var1 = ( dig_P3 * var1 * var1 / 524288.0 + dig_P2 * var1 ) / 524288.0;
+	// var1 = ( 1.0 + var1 / 32768.0 ) * dig_P1;
+
+	// *P = 1048576.0 - uP;
+
+	// *P = ( (*P) - ( var2 / 4096.0 ) ) * 6250.0 / var1;  //overflow
+
+	// var1 = dig_P9 * (*P) * (*P) / 2147483648.0; 	    //overflow
+
+	// var2 = (*P) * dig_P8 / 32768.0;
+	// *P = (*P) + ( var1 + var2 + dig_P7 ) / 16.0;
+		
+	// *P = (*P) / 100.0;
+	
+	// if ( (*P) > 1200.0 || (*P) < 800.0 ) 
+    // {
+    //     IotLogError( "Calculating pressure failed: P = %f", *P );
+    //     return BMP280_FAIL;
+    // }
+
+    IotLogDebug( "Calculated pressure: P = %f", *P );
 	
     return BMP280_SUCCESS;
 }
@@ -491,7 +446,7 @@ bmp280_err_t calcPressure( double * P, double uP )
  * @param   A:  current altitude in meters.
  * @return  sea-level pressure in mbar
  */
-double sealevel( double P, double A )
+float fBmp280GetSeaLevel( float P, float A )
 {
     return ( P / pow( 1 - ( A / 44330.0 ) , 5.255 ) );
 }
@@ -506,7 +461,7 @@ double sealevel( double P, double A )
  * @return  signed altitude in meters
  */
 
-double altitude( double P, double P0 )
+float fBmp280GetAltitude( float P, float P0 )
 {
     return ( 44330.0 * ( 1 - pow( P / P0 , 1 / 5.255 ) ) );
 }

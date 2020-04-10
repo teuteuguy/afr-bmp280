@@ -1,5 +1,6 @@
 /**
- * bmp280.h - Component to work with BMP280
+ * @file bmp280.h
+ * @brief Component to work with BMP280
  *
  * Include this header file to use the component.
  *
@@ -82,8 +83,16 @@ typedef int32_t bmp280_err_t;
  * @return  BMP280_SUCCESS success
  *          BMP280_FAIL errors found
  */
-bmp280_err_t eBmp280Init( IotI2CHandle_t handle );
+bmp280_err_t eBmp280Init( IotI2CHandle_t const handle );
 
+/**
+ * @brief   Soft Reset the BMP280 Sensor.
+ * 
+ * 
+ * @return  BMP280_SUCCESS success
+ *          BMP280_FAIL errors found
+ */
+bmp280_err_t eBmp280SoftReset( void );
 
 /**
  * @brief   Begin a measurement cycle.
@@ -93,7 +102,7 @@ bmp280_err_t eBmp280Init( IotI2CHandle_t handle );
  * @return  BMP280_SUCCESS success
  *          BMP280_FAIL errors found
  */
-bmp280_err_t startMeasurement( uint8_t * delay );
+bmp280_err_t eBmp280StartMeasurement( uint8_t * delay );
 
 /**
  * @brief   Temperature calculation.
@@ -103,7 +112,7 @@ bmp280_err_t startMeasurement( uint8_t * delay );
  * @return  BMP280_SUCCESS success
  *          BMP280_FAIL errors found
  */
-bmp280_err_t calcTemperature( double * T, double uT );
+bmp280_err_t eBmp280CalcTemperature( float * T, int32_t uT );
   
 /**
  * @brief   Pressure calculation.
@@ -113,7 +122,7 @@ bmp280_err_t calcTemperature( double * T, double uT );
  * @return  BMP280_SUCCESS success
  *          BMP280_FAIL errors found
  */
-bmp280_err_t calcPressure( double * P, double uP );
+bmp280_err_t eBmp280CalcPressure( float * P, int32_t uP );
   
 /**
  * @brief   Converts absolute pressure to sea-level pressure.
@@ -122,7 +131,7 @@ bmp280_err_t calcPressure( double * P, double uP );
  *
  * @return  sea-level pressure in mbar
  */
-double seaLevel( double P, double A );
+float fBmp280GetSeaLevel( float P, float A );
 
 /**
  * @brief   Convert absolute pressure to altitude (given baseline pressure; sea-level, runway, etc.)
@@ -131,7 +140,7 @@ double seaLevel( double P, double A );
  *
  * @return  signed altitude in meters
  */
-double altitude( double P, double P0 );
+float fBmp280GetAltitude( float P, float P0 );
 
 /**
  * @brief   Retrieve temperature and pressure.
@@ -141,7 +150,7 @@ double altitude( double P, double P0 );
  * @return  BMP280_SUCCESS success
  *          BMP280_FAIL errors found
  */
-bmp280_err_t getTemperatureAndPressure( double * T, double * P );
+bmp280_err_t eBmp280GetTemperatureAndPressure( float * T, float * P );
 
 #ifdef __cplusplus
 }
